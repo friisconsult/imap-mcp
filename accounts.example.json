@@ -1,0 +1,36 @@
+{
+  "accounts": {
+    "personal": {
+      "host": "imap.example.com",
+      "port": 993,
+      "encryption": "ssl",
+      "username": "you@example.com",
+      "password": "FILL-ME-IN",
+      "allow_writes": true,
+      "trash_folder": "Trash",
+      "smtp": {
+        "host": "smtp.example.com",
+        "port": 465,
+        "encryption": "ssl"
+      },
+      "allow_send_to": [
+        "*@accounting-service.example",
+        "you@example.com"
+      ]
+    },
+    "readonly-example": {
+      "host": "imap.example.org",
+      "port": 993,
+      "encryption": "ssl",
+      "username": "you@example.org",
+      "password": "FILL-ME-IN"
+    },
+    "starttls-example": {
+      "host": "mail.example.net",
+      "port": 143,
+      "encryption": "starttls",
+      "username": "info@example.net",
+      "password": "FILL-ME-IN"
+    }
+  }
+}
