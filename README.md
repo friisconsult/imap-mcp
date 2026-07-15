@@ -64,6 +64,7 @@ Requires Python 3.11+ on PATH and Claude Desktop installed.
 | `create_folder` | Create a new folder (requires `allow_writes`) |
 | `move_messages` | Move messages between folders (requires `allow_writes`) |
 | `trash_messages` | Move messages to the trash folder (requires `allow_writes`) |
+| `mark_messages` | Star/unstar and mark read/unread (requires `allow_writes`) |
 | `forward_message` | Forward a message incl. attachments (requires `smtp` + `allow_send_to`) |
 
 ## Notes and limitations

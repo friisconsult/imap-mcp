@@ -46,7 +46,7 @@ async def main() -> None:
         expected = {
             "list_accounts", "list_folders", "search_messages", "get_message",
             "download_attachment", "create_folder", "move_messages",
-            "trash_messages", "forward_message",
+            "trash_messages", "forward_message", "mark_messages",
         }
         assert expected == set(names), f"tool mismatch: {expected ^ set(names)}"
         print("tool registration OK:", names)
@@ -76,6 +76,18 @@ async def main() -> None:
             raise AssertionError("empty uids not rejected")
         except ValueError:
             print("uid validation OK")
+
+        # mark gating: no allow_writes -> refused; no-op flags rejected
+        try:
+            server.mark_messages("readonly", ["1"], flagged=True)
+            raise AssertionError("mark on read-only account not refused")
+        except PermissionError:
+            print("mark gating OK")
+        try:
+            server.mark_messages("writable", ["1"])
+            raise AssertionError("mark without flags not rejected")
+        except ValueError:
+            print("mark no-op validation OK")
 
         # send gating: account without allow_send_to -> refused
         try:

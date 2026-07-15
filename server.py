@@ -17,7 +17,7 @@ from datetime import date, datetime
 from email.message import EmailMessage
 from pathlib import Path
 
-from imap_tools import AND, MailBox, MailBoxStartTls
+from imap_tools import AND, MailBox, MailBoxStartTls, MailMessageFlags
 from mcp.server.fastmcp import FastMCP
 
 CONFIG_PATH = Path(__file__).parent / "accounts.json"
@@ -381,6 +381,34 @@ def trash_messages(account: str, uids: list[str], folder: str = "INBOX") -> str:
         mailbox.move(uids, trash)
     return json.dumps(
         {"trashed": len(uids), "moved_to": trash}, ensure_ascii=False
+    )
+
+
+@mcp.tool()
+def mark_messages(
+    account: str,
+    uids: list[str],
+    folder: str = "INBOX",
+    flagged: bool | None = None,
+    unread: bool | None = None,
+) -> str:
+    """Set or clear the flagged (star) and/or unread status on messages
+    (requires allow_writes on the account). Pass flagged=true to star,
+    flagged=false to unstar; unread=true to mark as unread, unread=false
+    to mark as read. Omitted parameters are left unchanged."""
+    _require_writes(account)
+    if not uids:
+        raise ValueError("uids must not be empty")
+    if flagged is None and unread is None:
+        raise ValueError("Set at least one of flagged/unread")
+    with _connect(account, folder, readonly=False) as mailbox:
+        if flagged is not None:
+            mailbox.flag(uids, MailMessageFlags.FLAGGED, flagged)
+        if unread is not None:
+            mailbox.flag(uids, MailMessageFlags.SEEN, not unread)
+    return json.dumps(
+        {"marked": len(uids), "flagged": flagged, "unread": unread},
+        ensure_ascii=False,
     )
 
 
