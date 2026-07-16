@@ -12,6 +12,7 @@ user sends them from their own mail client.
 
 import fnmatch
 import json
+import mimetypes
 import re
 import smtplib
 import sys
@@ -27,6 +28,7 @@ CONFIG_PATH = Path(__file__).parent / "accounts.json"
 SCAN_LIMIT_HEADERS = 300   # max messages scanned per search (headers only)
 SCAN_LIMIT_FULL = 75       # max messages scanned when body text must be read
 BODY_PREVIEW_CHARS = 8000
+ATTACHMENTS_TOTAL_LIMIT = 25 * 1024 * 1024  # many servers reject larger APPENDs
 
 mcp = FastMCP("imap-mail")
 
@@ -101,6 +103,13 @@ def _require_writes(name: str) -> dict:
 
 def _is_ascii(s: str) -> bool:
     return s.isascii()
+
+
+def _unfold(value: str) -> str:
+    """RFC 5322 header unfolding: CRLF followed by whitespace collapses to
+    a single space. Values copied from fetched messages may still be folded
+    and the email lib refuses header values containing CR/LF."""
+    return re.sub(r"\r?\n[ \t]*", " ", value).strip()
 
 
 def _parse_date(value: str, param: str) -> date:
@@ -191,15 +200,28 @@ def search_messages(
     if before:
         criteria.append(AND(date_lt=_parse_date(before, "before")))
     # IMAP text search criteria only go server-side when pure ASCII; many
-    # servers reject UTF-8 SEARCH. Non-ASCII terms are filtered locally.
-    if from_ and _is_ascii(from_):
-        criteria.append(AND(from_=from_))
-    if subject and _is_ascii(subject):
-        criteria.append(AND(subject=subject))
-    if text and _is_ascii(text):
-        criteria.append(AND(text=text))
+    # servers reject UTF-8 SEARCH. Non-ASCII terms are filtered locally —
+    # and ONLY those: a criterion the server already applied must not be
+    # re-checked locally (server TEXT covers all headers + body, which a
+    # headers-only local check cannot reproduce).
+    local_from = local_subject = local_text = None
+    if from_:
+        if _is_ascii(from_):
+            criteria.append(AND(from_=from_))
+        else:
+            local_from = from_
+    if subject:
+        if _is_ascii(subject):
+            criteria.append(AND(subject=subject))
+        else:
+            local_subject = subject
+    if text:
+        if _is_ascii(text):
+            criteria.append(AND(text=text))
+        else:
+            local_text = text
 
-    needs_body = bool(text and not _is_ascii(text))
+    needs_body = local_text is not None
     scan_budget = SCAN_LIMIT_FULL if needs_body else SCAN_LIMIT_HEADERS
     server_criteria = AND(*criteria) if criteria else "ALL"
     want = max(limit * 3, limit) if with_attachments_only else limit
@@ -212,6 +234,7 @@ def search_messages(
 
         scanned = 0
         skipped_folders = []
+        searched_folders = []
         matched: dict[str, list[str]] = {}
         n_matched = 0
         for fname in folder_names:
@@ -222,6 +245,7 @@ def search_messages(
             except Exception:
                 skipped_folders.append(fname)  # non-selectable (namespace etc.)
                 continue
+            searched_folders.append(fname)
             for msg in mailbox.fetch(
                 server_criteria,
                 reverse=True,
@@ -230,7 +254,8 @@ def search_messages(
                 headers_only=not needs_body,
             ):
                 scanned += 1
-                if not _matches(msg, from_, subject, text, include_body=needs_body):
+                if not _matches(msg, local_from, local_subject, local_text,
+                                include_body=needs_body):
                     continue
                 matched.setdefault(fname, []).append(msg.uid)
                 n_matched += 1
@@ -251,17 +276,27 @@ def search_messages(
                 if len(results) >= limit:
                     break
 
-    truncated = scanned >= scan_budget
+    handled = set(searched_folders) | set(skipped_folders)
+    folders_not_searched = [f for f in folder_names if f not in handled]
+    truncated = scanned >= scan_budget or bool(folders_not_searched)
+    if scanned >= scan_budget:
+        note = ("Scan budget exhausted — narrow the date range"
+                + (" (folders_not_searched were never reached)."
+                   if folders_not_searched else " to search older mail."))
+    elif folders_not_searched:
+        note = ("Stopped after finding enough matches — folders_not_searched "
+                "were never reached; raise the limit to keep going.")
+    else:
+        note = "All folders in scope fully scanned."
     return json.dumps(
         {
             "results": results,
             "scanned": scanned,
             "scan_truncated": truncated,
+            "folders_searched": searched_folders,
+            "folders_not_searched": folders_not_searched,
             "skipped_folders": skipped_folders,
-            "note": (
-                "Scan hit the limit — narrow the date range to search older mail."
-                if truncated else "Full date range scanned."
-            ),
+            "note": note,
         },
         ensure_ascii=False,
         indent=2,
@@ -424,6 +459,7 @@ def create_draft(
     cc: str | None = None,
     reply_to_uid: str | None = None,
     folder: str = "INBOX",
+    attachments: list[str] | None = None,
 ) -> str:
     """Save a draft email in the account's drafts folder (requires
     allow_writes). Nothing is sent — the draft appears in the mail
@@ -431,12 +467,39 @@ def create_draft(
     themselves. With reply_to_uid the draft becomes a reply to that
     message (looked up in `folder`): quoted original text, "Re:" subject
     and threading headers; `to` then defaults to the original sender.
-    to/cc accept comma-separated addresses. The drafts folder name comes
-    from the account's "drafts_folder" config (default: "Drafts")."""
+    to/cc accept comma-separated addresses. attachments are absolute
+    local file paths to attach (max 25 MB in total). The drafts folder
+    name comes from the account's "drafts_folder" config (default:
+    "Drafts")."""
     acc = _require_writes(account)
-    if not (subject or body or reply_to_uid):
-        raise ValueError("Provide at least a subject or body (or reply_to_uid)")
+    if not (subject or body or reply_to_uid or attachments):
+        raise ValueError(
+            "Provide at least a subject, body, reply_to_uid or attachments"
+        )
     drafts = acc.get("drafts_folder", "Drafts")
+
+    files: list[tuple[str, bytes, str, str]] = []
+    total_size = 0
+    for p in attachments or []:
+        path = Path(p)
+        if not path.is_absolute():
+            raise ValueError(f"Attachment path must be absolute: {p!r}")
+        if not path.is_file():
+            raise ValueError(f"Attachment not found or not a file: {p!r}")
+        try:
+            data = path.read_bytes()
+        except OSError as e:
+            raise ValueError(f"Attachment not readable: {p!r} ({e})")
+        total_size += len(data)
+        if total_size > ATTACHMENTS_TOTAL_LIMIT:
+            raise ValueError(
+                f"Attachments exceed the total limit of "
+                f"{ATTACHMENTS_TOTAL_LIMIT // (1024 * 1024)} MB "
+                f"(many servers reject larger drafts)"
+            )
+        ctype, _ = mimetypes.guess_type(path.name)
+        maintype, _, subtype = (ctype or "application/octet-stream").partition("/")
+        files.append((path.name, data, maintype, subtype))
 
     draft = EmailMessage()
     draft["From"] = acc.get("smtp", {}).get("from", acc["username"])
@@ -459,16 +522,16 @@ def create_draft(
                 raise ValueError(f"No message with uid {reply_to_uid} in {folder}")
             src = msgs[0]
             sender_addr = src.from_values.email if src.from_values else src.from_
-            draft["To"] = to or sender_addr
-            orig_subject = src.subject or "(no subject)"
+            draft["To"] = to or _unfold(sender_addr or "")
+            orig_subject = _unfold(src.subject or "") or "(no subject)"
             draft["Subject"] = subject or (
                 orig_subject if orig_subject.lower().startswith("re:")
                 else f"Re: {orig_subject}"
             )
-            message_id = (src.headers.get("message-id", ("",))[0]).strip()
+            message_id = _unfold(src.headers.get("message-id", ("",))[0])
             if message_id:
                 draft["In-Reply-To"] = message_id
-                references = (src.headers.get("references", ("",))[0]).strip()
+                references = _unfold(src.headers.get("references", ("",))[0])
                 draft["References"] = f"{references} {message_id}".strip()
             quoted = "\n".join(f"> {line}" for line in (src.text or "").splitlines())
             if quoted:
@@ -480,6 +543,10 @@ def create_draft(
         if cc:
             draft["Cc"] = cc
         draft.set_content(content.strip())
+        for filename, data, maintype, subtype in files:
+            draft.add_attachment(
+                data, maintype=maintype, subtype=subtype, filename=filename
+            )
 
         mailbox.append(
             draft.as_bytes(), drafts, flag_set=[MailMessageFlags.DRAFT]
@@ -492,6 +559,7 @@ def create_draft(
             "cc": draft["Cc"],
             "subject": draft["Subject"],
             "in_reply_to_uid": reply_to_uid,
+            "attachments": [f[0] for f in files],
         },
         ensure_ascii=False,
         indent=2,
@@ -526,7 +594,7 @@ def forward_message(
     sender = acc.get("smtp", {}).get("from", acc["username"])
     fwd["From"] = sender
     fwd["To"] = to
-    subject = src.subject or "(no subject)"
+    subject = _unfold(src.subject or "") or "(no subject)"
     fwd["Subject"] = subject if subject.lower().startswith("fwd:") else f"Fwd: {subject}"
 
     parts = []

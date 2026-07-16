@@ -30,7 +30,8 @@ Gating checks run **before** any network connection (the tests rely on this — 
 
 Other invariants worth knowing:
 
-- **Search scan budgets:** `search_messages` scans at most `SCAN_LIMIT_HEADERS` (300) messages, or `SCAN_LIMIT_FULL` (75) when body text must be fetched. Non-ASCII search terms are never sent as IMAP SEARCH criteria (many servers reject UTF-8 SEARCH) — they're filtered locally via `_matches()`. Responses report `scan_truncated` so the calling model knows to narrow the date range.
+- **Search scan budgets:** `search_messages` scans at most `SCAN_LIMIT_HEADERS` (300) messages, or `SCAN_LIMIT_FULL` (75) when body text must be fetched. Non-ASCII search terms are never sent as IMAP SEARCH criteria (many servers reject UTF-8 SEARCH) — they're filtered locally via `_matches()`. Crucially, a criterion the server already applied must NOT be re-checked locally: server TEXT matches all headers + body, which a headers-only local check cannot reproduce (re-filtering silently dropped valid hits — that bug has been made once already). Responses report `scan_truncated`, `folders_searched` and `folders_not_searched` so the calling model knows to narrow the date range.
+- **Header values copied from fetched messages** (subject, Message-ID, References, sender) must pass through `_unfold()` before being set on a new outgoing/draft message — RFC 5322 folded headers still contain CRLF, which `EmailMessage` rejects.
 - **Connections** go through `_connect()` (SSL default port 993, `"starttls"` → port 143, per-account override). Config is re-read from disk on every call — no caching, so edits to `accounts.json` take effect immediately.
 - **Tool output** is always a JSON string (`json.dumps(..., ensure_ascii=False)`); user-facing errors are raised as `ValueError`/`PermissionError`/`RuntimeError` with messages that tell the model (or user) how to fix the problem, including what to change in `accounts.json`.
 

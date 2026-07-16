@@ -109,7 +109,7 @@ Requires Python 3.11+ on PATH and Claude Desktop installed.
 | `move_messages` | Move messages between folders (requires `allow_writes`) |
 | `trash_messages` | Move messages to the trash folder (requires `allow_writes`) |
 | `mark_messages` | Star/unstar and mark read/unread (requires `allow_writes`) |
-| `create_draft` | Save a draft — new mail or reply — in the Drafts folder; never sends (requires `allow_writes`) |
+| `create_draft` | Save a draft — new mail or reply, optionally with local files attached — in the Drafts folder; never sends (requires `allow_writes`) |
 | `forward_message` | Forward a message incl. attachments (requires `smtp` + `allow_send_to`) |
 
 ## Notes and limitations
@@ -117,8 +117,11 @@ Requires Python 3.11+ on PATH and Claude Desktop installed.
 - Search criteria containing non-ASCII characters are not sent to the
   IMAP server (many servers reject UTF-8 SEARCH) — they are filtered
   locally instead. Always constrain with `since`/`before`; otherwise only
-  the newest ~300 messages are scanned, and the response sets
-  `scan_truncated: true` so the model knows to narrow the range.
+  the newest ~300 matching messages are scanned. The response reports
+  exactly which folders were searched (`folders_searched` /
+  `folders_not_searched`) and sets `scan_truncated: true` whenever the
+  budget stopped the traversal early, so the model knows to narrow the
+  range.
 - `accounts.json` stores credentials in plain text. Keep it out of git
   and sync services (it is gitignored here), prefer app passwords, and
   treat the file like you would a password manager export.

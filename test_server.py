@@ -104,6 +104,53 @@ async def main() -> None:
         except ValueError:
             print("draft content validation OK")
 
+        # RFC 5322 header unfolding (folded subject observed in real mail)
+        folded = "Faktura fra e-conomic vedr. aftalenummer 1027203 | Per Friis\r\n Consult ApS"
+        assert server._unfold(folded) == (
+            "Faktura fra e-conomic vedr. aftalenummer 1027203 | Per Friis Consult ApS"
+        )
+        assert server._unfold("<id@x>\r\n\t<id2@x>") == "<id@x> <id2@x>"
+        print("header unfolding OK")
+
+        # attachment validation fires before any connection
+        try:
+            server.create_draft("writable", subject="x", attachments=["rel/path.pdf"])
+            raise AssertionError("relative attachment path not rejected")
+        except ValueError as e:
+            assert "absolute" in str(e)
+            print("attachment absolute-path validation OK")
+        try:
+            server.create_draft(
+                "writable", subject="x", attachments=[str(Path(tmp) / "missing.pdf")]
+            )
+            raise AssertionError("missing attachment not rejected")
+        except ValueError as e:
+            assert "missing.pdf" in str(e)
+            print("attachment missing-file validation OK")
+
+        # total size cap (shrunk for the test)
+        big = Path(tmp) / "big.bin"
+        big.write_bytes(b"x" * 1024)
+        orig_limit = server.ATTACHMENTS_TOTAL_LIMIT
+        server.ATTACHMENTS_TOTAL_LIMIT = 512
+        try:
+            server.create_draft("writable", subject="x", attachments=[str(big)])
+            raise AssertionError("oversized attachments not rejected")
+        except ValueError as e:
+            assert "limit" in str(e)
+            print("attachment size-cap validation OK")
+        finally:
+            server.ATTACHMENTS_TOTAL_LIMIT = orig_limit
+
+        # valid attachment passes validation (then fails at connect)
+        try:
+            server.create_draft("writable", subject="x", attachments=[str(big)])
+            raise AssertionError("should have failed at the connection stage")
+        except ValueError:
+            raise AssertionError("valid attachment wrongly refused")
+        except Exception:
+            print("attachment pass-through OK (failed at connect as expected)")
+
         # send gating: account without allow_send_to -> refused
         try:
             server.forward_message("readonly", "1", "x@allowed.invalid")
