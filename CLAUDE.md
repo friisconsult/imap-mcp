@@ -10,7 +10,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```bash
 bash setup.sh                        # create .venv, install deps, register in Claude Desktop (idempotent)
-.venv/bin/python server.py --check   # validate accounts.json without starting the server
+.venv/bin/python server.py --check   # validate accounts.json + password resolution without starting the server
+.venv/bin/python server.py --set-password "<account>"  # store a password in the OS keychain
 .venv/bin/python test_server.py      # run tests (offline — no mail server, no framework, plain asserts)
 ```
 
@@ -33,6 +34,8 @@ Other invariants worth knowing:
 - **Search scan budgets:** `search_messages` scans at most `SCAN_LIMIT_HEADERS` (300) messages, or `SCAN_LIMIT_FULL` (75) when body text must be fetched. Non-ASCII search terms are never sent as IMAP SEARCH criteria (many servers reject UTF-8 SEARCH) — they're filtered locally via `_matches()`. Crucially, a criterion the server already applied must NOT be re-checked locally: server TEXT matches all headers + body, which a headers-only local check cannot reproduce (re-filtering silently dropped valid hits — that bug has been made once already). Responses report `scan_truncated`, `folders_searched` and `folders_not_searched` so the calling model knows to narrow the date range.
 - **Header values copied from fetched messages** (subject, Message-ID, References, sender) must pass through `_unfold()` before being set on a new outgoing/draft message — RFC 5322 folded headers still contain CRLF, which `EmailMessage` rejects.
 - **Connections** go through `_connect()` (SSL default port 993, `"starttls"` → port 143, per-account override). Config is re-read from disk on every call — no caching, so edits to `accounts.json` take effect immediately.
+- **Passwords** resolve via `_resolve_password()`: explicit `"password"` in `accounts.json` wins, otherwise the OS keychain (`keyring`, service `imap-mcp`, username = account name). Missing/broken resolution raises `RuntimeError` with the fix in the message; `--check` resolves every account so problems surface there, not at first use. Tests inject a fake `keyring` into `sys.modules` (the import in `_resolve_password` is deliberately lazy to allow this).
+- **stdout is the MCP protocol** — any diagnostic output from server code (e.g. the synced-folder warning in `_warn_if_synced`) must go to stderr.
 - **Tool output** is always a JSON string (`json.dumps(..., ensure_ascii=False)`); user-facing errors are raised as `ValueError`/`PermissionError`/`RuntimeError` with messages that tell the model (or user) how to fix the problem, including what to change in `accounts.json`.
 
 ## Adding or changing a tool

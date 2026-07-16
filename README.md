@@ -83,18 +83,26 @@ Requires Python 3.11+ on PATH and Claude Desktop installed.
    `accounts.json` from the template (if missing) and registers the
    server as `imap-mail` in Claude Desktop's config (Windows:
    `%APPDATA%\Claude\`, macOS: `~/Library/Application Support/Claude/`).
-2. Fill in `accounts.json` — host, username and password per account.
-   The key (e.g. `personal`) is the name Claude uses as the `account`
-   parameter.
+2. Fill in `accounts.json` — host and username per account. The key
+   (e.g. `personal`) is the name Claude uses as the `account` parameter.
    - `encryption`: `"ssl"` (port 993, default) or `"starttls"` (port 143).
    - Use an app password if your provider supports them.
    - `accounts.json` is gitignored — credentials are entered per machine.
-3. Test the configuration (Windows: `.venv\Scripts\python.exe`,
-   macOS/Linux: `.venv/bin/python`):
+3. Store each account's password — preferably in the OS keychain
+   (Windows: `.venv\Scripts\python.exe`, macOS/Linux: `.venv/bin/python`):
+   ```
+   .venv/bin/python server.py --set-password "personal"
+   ```
+   and leave `"password"` out of `accounts.json`. Setting `"password"`
+   in the file also works (see [Credential storage](#credential-storage)
+   for the trade-off).
+4. Test the configuration:
    ```
    .venv/bin/python server.py --check
    ```
-4. Restart Claude Desktop.
+   This reports where each account's password comes from and fails
+   loudly if one is missing.
+5. Restart Claude Desktop.
 
 ## Tools
 
@@ -112,6 +120,45 @@ Requires Python 3.11+ on PATH and Claude Desktop installed.
 | `create_draft` | Save a draft — new mail or reply, optionally with local files attached — in the Drafts folder; never sends (requires `allow_writes`) |
 | `forward_message` | Forward a message incl. attachments (requires `smtp` + `allow_send_to`) |
 
+## Credential storage
+
+Passwords are resolved per account in this order:
+
+1. `"password"` in `accounts.json` — works everywhere, but plain text.
+2. The OS keychain (macOS Keychain, Windows Credential Manager, Secret
+   Service/KWallet on Linux) under service `imap-mcp` with the account
+   name as key. Store one with:
+   ```
+   .venv/bin/python server.py --set-password "personal"
+   ```
+   The interactive prompt keeps the secret out of shell history and the
+   process table.
+
+Be honest about what the keychain buys you — it differs per platform:
+
+- **macOS:** Keychain items carry an ACL of trusted apps, so a foreign
+  process calling `security find-generic-password` triggers a user
+  prompt. Real protection — but an attacker who can run this project's
+  venv python and import `keyring` gets the password without a prompt.
+  Better than a file, not a vault.
+- **Windows:** Credential Manager is DPAPI-backed per user account. Any
+  process running as your user can decrypt it, so against a local
+  attacker it is roughly equivalent to the plain-text file. The gain is
+  that the secret no longer sits in a file that can be synced, backed up
+  or committed by accident.
+- **Linux:** depends entirely on a running Secret Service (GNOME
+  Keyring / KWallet). On a headless server there is none — keep the
+  password in `accounts.json` there; the error message will tell you.
+
+In short: the keychain protects well against *accidental* leaks (git,
+backups, file sync, a config flashed on screen) and not at all against a
+targeted local attacker running as your user. That trade-off is why both
+options exist.
+
+Belt and braces either way: `install.py` creates `accounts.json` with
+mode 600, and the server warns on startup and `--check` if the config
+file lives in a synced folder (Dropbox, iCloud, OneDrive, Google Drive).
+
 ## Notes and limitations
 
 - Search criteria containing non-ASCII characters are not sent to the
@@ -122,9 +169,10 @@ Requires Python 3.11+ on PATH and Claude Desktop installed.
   `folders_not_searched`) and sets `scan_truncated: true` whenever the
   budget stopped the traversal early, so the model knows to narrow the
   range.
-- `accounts.json` stores credentials in plain text. Keep it out of git
-  and sync services (it is gitignored here), prefer app passwords, and
-  treat the file like you would a password manager export.
+- With `"password"` set, `accounts.json` stores credentials in plain
+  text. Prefer the OS keychain (see Credential storage), keep the file
+  out of git and sync services (it is gitignored here), prefer app
+  passwords, and treat the file like a password manager export.
 - Authentication is plain IMAP/SMTP login — no OAuth. Gmail and
   Microsoft 365 accounts are better served by their official connectors
   anyway; this server is for everything else.

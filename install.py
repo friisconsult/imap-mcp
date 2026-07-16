@@ -34,6 +34,8 @@ def main() -> int:
     # 1) accounts.json: create from the template if missing
     if not ACCOUNTS.exists():
         shutil.copy(EXAMPLE, ACCOUNTS)
+        if os.name == "posix":
+            ACCOUNTS.chmod(0o600)  # credentials file — owner-only
         print(f"Created {ACCOUNTS.name} from the template — REMEMBER to fill "
               "in host/username/password before using the server.")
     else:

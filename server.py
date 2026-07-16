@@ -29,6 +29,7 @@ SCAN_LIMIT_HEADERS = 300   # max messages scanned per search (headers only)
 SCAN_LIMIT_FULL = 75       # max messages scanned when body text must be read
 BODY_PREVIEW_CHARS = 8000
 ATTACHMENTS_TOTAL_LIMIT = 25 * 1024 * 1024  # many servers reject larger APPENDs
+KEYRING_SERVICE = "imap-mcp"
 
 mcp = FastMCP("imap-mail")
 
@@ -56,16 +57,68 @@ def _get_account(name: str) -> dict:
     return accounts[name]
 
 
+def _resolve_password(name: str, acc: dict) -> str:
+    """Resolve the password for an account.
+
+    Precedence: explicit "password" in accounts.json (legacy, discouraged)
+    -> OS keychain (service "imap-mcp", username = account name). Fails
+    loudly so a misconfigured account surfaces at --check time rather
+    than at first use."""
+    if password := acc.get("password"):
+        return password
+    try:
+        import keyring
+        from keyring.errors import KeyringError
+    except ImportError as exc:
+        raise RuntimeError(
+            f"Account '{name}' has no \"password\" in accounts.json and the "
+            f"keyring package is not installed. Re-run setup, or add the "
+            f"password to accounts.json."
+        ) from exc
+    try:
+        password = keyring.get_password(KEYRING_SERVICE, name)
+    except KeyringError as exc:
+        # Headless Linux with no Secret Service is the common case here.
+        raise RuntimeError(
+            f"No OS keychain backend available for account '{name}'. Either "
+            f"install a keyring backend or set \"password\" on the account "
+            f"in accounts.json. Original error: {exc}"
+        ) from exc
+    if not password:
+        raise RuntimeError(
+            f"No password found for account '{name}' — either set "
+            f"\"password\" in accounts.json or store one in the OS keychain "
+            f"with: python server.py --set-password '{name}'"
+        )
+    return password
+
+
 def _connect(name: str, folder: str | None = "INBOX", readonly: bool = True):
     acc = _get_account(name)
     encryption = acc.get("encryption", "ssl")
     port = acc.get("port", 993 if encryption == "ssl" else 143)
     box_cls = MailBoxStartTls if encryption == "starttls" else MailBox
     mailbox = box_cls(acc["host"], port=port, timeout=30)
-    mailbox.login(acc["username"], acc["password"])
+    mailbox.login(acc["username"], _resolve_password(name, acc))
     if folder is not None:
         mailbox.folder.set(folder, readonly=readonly)
     return mailbox
+
+
+def _warn_if_synced(path: Path) -> None:
+    """Warn (on stderr — stdout is the MCP protocol) when the config file
+    lives in a folder that gets synced to a cloud service."""
+    markers = ("Dropbox", "Mobile Documents", "CloudStorage", "iCloud",
+               "OneDrive", "Google Drive")
+    hit = next((m for m in markers if m in str(path)), None)
+    if hit:
+        print(
+            f"WARNING: {path} appears to live in a synced folder ({hit}) — "
+            f"plain-text credentials may be uploaded. Move the project, or "
+            f"remove \"password\" from accounts.json and use "
+            f"--set-password to keep passwords in the OS keychain.",
+            file=sys.stderr,
+        )
 
 
 def _require_send(name: str, to: str) -> dict:
@@ -622,7 +675,7 @@ def forward_message(
     smtp_enc = smtp_cfg.get("encryption", "ssl")
     smtp_port = smtp_cfg.get("port", 465 if smtp_enc == "ssl" else 587)
     smtp_user = smtp_cfg.get("username", acc["username"])
-    smtp_pass = smtp_cfg.get("password", acc["password"])
+    smtp_pass = smtp_cfg.get("password") or _resolve_password(account, acc)
 
     if smtp_enc == "ssl":
         smtp = smtplib.SMTP_SSL(smtp_host, smtp_port, timeout=30)
@@ -648,8 +701,51 @@ def forward_message(
 
 
 if __name__ == "__main__":
+    if "--set-password" in sys.argv:
+        idx = sys.argv.index("--set-password")
+        if idx + 1 >= len(sys.argv):
+            print("Usage: server.py --set-password <account>", file=sys.stderr)
+            sys.exit(2)
+        name = sys.argv[idx + 1]
+        if name not in _load_accounts():
+            print(
+                f"Unknown account {name!r}. Available: "
+                f"{', '.join(sorted(_load_accounts()))}",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        import getpass
+
+        import keyring
+
+        # getpass keeps the secret out of shell history and the process table
+        password = getpass.getpass(f"Password for {name!r}: ")
+        if not password:
+            print("Empty password — nothing stored.", file=sys.stderr)
+            sys.exit(2)
+        keyring.set_password(KEYRING_SERVICE, name, password)
+        print(f"Stored password for {name!r} in the OS keychain. You can now "
+              f"remove \"password\" from that account in accounts.json.")
+        sys.exit(0)
+
     if "--check" in sys.argv:
         accounts = _load_accounts()
+        _warn_if_synced(CONFIG_PATH)
+        failed = []
+        for name, acc in sorted(accounts.items()):
+            try:
+                _resolve_password(name, acc)
+            except RuntimeError as e:
+                failed.append(name)
+                print(f"  {name}: NO PASSWORD — {e}")
+                continue
+            source = "accounts.json" if acc.get("password") else "OS keychain"
+            print(f"  {name}: password from {source}")
+        if failed:
+            print(f"Config INCOMPLETE: no password for {', '.join(failed)}")
+            sys.exit(1)
         print(f"Config OK: {len(accounts)} account(s): {', '.join(sorted(accounts))}")
         sys.exit(0)
+
+    _warn_if_synced(CONFIG_PATH)
     mcp.run()
