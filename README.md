@@ -66,8 +66,10 @@ mail trying to prompt-inject it:
 - **Forwarding only to a whitelist.** `forward_message` requires an
   `"smtp"` block and an `"allow_send_to"` list on the account. Recipients
   are matched against the list (wildcards like `*@e-conomic.dk` are
-  fine) — anything else is refused hard. There is no compose-new-mail
-  tool, only forward.
+  fine) — anything else is refused hard. There is no send-new-mail tool:
+  `create_draft` can compose mail (including replies), but only saves it
+  to the Drafts folder — you review and hit send in your own mail
+  client.
 
 ## Setup
 
@@ -107,6 +109,7 @@ Requires Python 3.11+ on PATH and Claude Desktop installed.
 | `move_messages` | Move messages between folders (requires `allow_writes`) |
 | `trash_messages` | Move messages to the trash folder (requires `allow_writes`) |
 | `mark_messages` | Star/unstar and mark read/unread (requires `allow_writes`) |
+| `create_draft` | Save a draft — new mail or reply — in the Drafts folder; never sends (requires `allow_writes`) |
 | `forward_message` | Forward a message incl. attachments (requires `smtp` + `allow_send_to`) |
 
 ## Notes and limitations

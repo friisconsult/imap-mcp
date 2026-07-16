@@ -47,6 +47,7 @@ async def main() -> None:
             "list_accounts", "list_folders", "search_messages", "get_message",
             "download_attachment", "create_folder", "move_messages",
             "trash_messages", "forward_message", "mark_messages",
+            "create_draft",
         }
         assert expected == set(names), f"tool mismatch: {expected ^ set(names)}"
         print("tool registration OK:", names)
@@ -88,6 +89,20 @@ async def main() -> None:
             raise AssertionError("mark without flags not rejected")
         except ValueError:
             print("mark no-op validation OK")
+
+        # draft gating: no allow_writes -> refused before any connection
+        try:
+            server.create_draft("readonly", subject="Hi", body="text")
+            raise AssertionError("draft on read-only account not refused")
+        except PermissionError:
+            print("draft gating OK")
+
+        # empty draft rejected before any connection
+        try:
+            server.create_draft("writable")
+            raise AssertionError("empty draft not rejected")
+        except ValueError:
+            print("draft content validation OK")
 
         # send gating: account without allow_send_to -> refused
         try:

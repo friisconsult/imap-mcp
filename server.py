@@ -2,10 +2,12 @@
 
 Multi-account IMAP via accounts.json. Read operations (search, read,
 attachment download) work on every account. Write operations (move mail,
-create folders, move to trash) require "allow_writes": true on the account
-in accounts.json — without it every write tool refuses. There is no
-permanent-delete and no send capability at all; "delete" means move to the
-account's trash folder.
+create folders, move to trash, save drafts) require "allow_writes": true
+on the account in accounts.json — without it every write tool refuses.
+There is no permanent-delete ("delete" means move to the account's trash
+folder), and the only way mail leaves the server is forward_message,
+gated by the allow_send_to whitelist. Drafts are saved, never sent — the
+user sends them from their own mail client.
 """
 
 import fnmatch
@@ -15,6 +17,7 @@ import smtplib
 import sys
 from datetime import date, datetime
 from email.message import EmailMessage
+from email.utils import format_datetime
 from pathlib import Path
 
 from imap_tools import AND, MailBox, MailBoxStartTls, MailMessageFlags
@@ -409,6 +412,89 @@ def mark_messages(
     return json.dumps(
         {"marked": len(uids), "flagged": flagged, "unread": unread},
         ensure_ascii=False,
+    )
+
+
+@mcp.tool()
+def create_draft(
+    account: str,
+    subject: str = "",
+    body: str = "",
+    to: str | None = None,
+    cc: str | None = None,
+    reply_to_uid: str | None = None,
+    folder: str = "INBOX",
+) -> str:
+    """Save a draft email in the account's drafts folder (requires
+    allow_writes). Nothing is sent — the draft appears in the mail
+    client's Drafts folder where the user reviews, edits and sends it
+    themselves. With reply_to_uid the draft becomes a reply to that
+    message (looked up in `folder`): quoted original text, "Re:" subject
+    and threading headers; `to` then defaults to the original sender.
+    to/cc accept comma-separated addresses. The drafts folder name comes
+    from the account's "drafts_folder" config (default: "Drafts")."""
+    acc = _require_writes(account)
+    if not (subject or body or reply_to_uid):
+        raise ValueError("Provide at least a subject or body (or reply_to_uid)")
+    drafts = acc.get("drafts_folder", "Drafts")
+
+    draft = EmailMessage()
+    draft["From"] = acc.get("smtp", {}).get("from", acc["username"])
+    draft["Date"] = format_datetime(datetime.now().astimezone())
+
+    with _connect(account, None) as mailbox:
+        existing = {f.name for f in mailbox.folder.list()}
+        if drafts not in existing:
+            raise ValueError(
+                f"Drafts folder {drafts!r} not found on server. Set "
+                f"\"drafts_folder\" on the account in accounts.json to one of: "
+                f"{sorted(existing)}"
+            )
+
+        content = body
+        if reply_to_uid:
+            mailbox.folder.set(folder, readonly=True)
+            msgs = list(mailbox.fetch(AND(uid=reply_to_uid), mark_seen=False, limit=1))
+            if not msgs:
+                raise ValueError(f"No message with uid {reply_to_uid} in {folder}")
+            src = msgs[0]
+            sender_addr = src.from_values.email if src.from_values else src.from_
+            draft["To"] = to or sender_addr
+            orig_subject = src.subject or "(no subject)"
+            draft["Subject"] = subject or (
+                orig_subject if orig_subject.lower().startswith("re:")
+                else f"Re: {orig_subject}"
+            )
+            message_id = (src.headers.get("message-id", ("",))[0]).strip()
+            if message_id:
+                draft["In-Reply-To"] = message_id
+                references = (src.headers.get("references", ("",))[0]).strip()
+                draft["References"] = f"{references} {message_id}".strip()
+            quoted = "\n".join(f"> {line}" for line in (src.text or "").splitlines())
+            if quoted:
+                content = f"{body}\n\nOn {src.date}, {src.from_} wrote:\n{quoted}"
+        else:
+            if to:
+                draft["To"] = to
+            draft["Subject"] = subject
+        if cc:
+            draft["Cc"] = cc
+        draft.set_content(content.strip())
+
+        mailbox.append(
+            draft.as_bytes(), drafts, flag_set=[MailMessageFlags.DRAFT]
+        )
+
+    return json.dumps(
+        {
+            "draft_saved_to": drafts,
+            "to": draft["To"],
+            "cc": draft["Cc"],
+            "subject": draft["Subject"],
+            "in_reply_to_uid": reply_to_uid,
+        },
+        ensure_ascii=False,
+        indent=2,
     )
 
 

@@ -23,8 +23,8 @@ Configuration lives in `accounts.json` (gitignored, plain-text credentials — n
 The central design decision is that **all guardrails live in `accounts.json`, not in prompts or tool descriptions**, so they hold under prompt injection from mail content. Every tool falls into one of three tiers, and any new tool must be gated the same way:
 
 1. **Read tools** (search, get, list, download) — always allowed, but must connect read-only and fetch with `mark_seen=False` so nothing is even marked read as a side effect.
-2. **Write tools** (move, trash, create folder, mark) — must call `_require_writes(account)` first, which raises `PermissionError` unless the account has `"allow_writes": true`. Deletion does not exist: `trash_messages` only moves to the account's `trash_folder` (default `Trash`); never add expunge/permanent delete.
-3. **Send** (`forward_message` only) — must call `_require_send(account, to)`, which enforces the `allow_send_to` fnmatch whitelist and requires an `smtp` block. There is deliberately no compose-new-mail tool.
+2. **Write tools** (move, trash, create folder, mark, create draft) — must call `_require_writes(account)` first, which raises `PermissionError` unless the account has `"allow_writes": true`. Deletion does not exist: `trash_messages` only moves to the account's `trash_folder` (default `Trash`); never add expunge/permanent delete. `create_draft` only APPENDs to the `drafts_folder` (default `Drafts`) — it composes but can never send, which is why it is a write tool, not a send tool.
+3. **Send** (`forward_message` only) — must call `_require_send(account, to)`, which enforces the `allow_send_to` fnmatch whitelist and requires an `smtp` block. There is deliberately no send-new-mail tool.
 
 Gating checks run **before** any network connection (the tests rely on this — they use `.invalid` hosts that can never resolve).
 
